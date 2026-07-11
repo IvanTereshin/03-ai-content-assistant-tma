@@ -4,8 +4,8 @@
 
 ## Целевое направление
 
-Ниша: creator content studio.  
-Визуальный стиль: warm newsprint, ink, fluorescent coral accent, condensed editorial typography.  
+Ниша: creator content studio.
+Визуальный стиль: warm newsprint, ink, fluorescent coral accent, condensed editorial typography.
 Главное ощущение: автор управляет контентом, а не просто нажимает кнопку генерации.
 
 ## Фаза 1. Дизайн-система
