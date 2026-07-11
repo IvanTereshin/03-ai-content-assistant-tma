@@ -355,7 +355,7 @@ button {
   align-items: center;
   justify-content: center;
   gap: 7px;
-  min-height: 42px;
+  min-height: 44px;
   border-radius: 13px;
   font-size: 14px;
   font-weight: 850;
@@ -378,7 +378,7 @@ button {
 }
 
 .small-link {
-  min-height: 32px;
+  min-height: 44px;
   padding: 0 10px;
   white-space: nowrap;
 }
