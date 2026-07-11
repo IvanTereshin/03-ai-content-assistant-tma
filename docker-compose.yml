@@ -1,0 +1,24 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        VITE_BILLING_MODE: ${VITE_BILLING_MODE:-demo}
+        VITE_BILLING_API_URL: ${VITE_BILLING_API_URL:-/api}
+    image: tma-ai-content-assistant:latest
+    container_name: demo-tma-content-assistant
+    restart: unless-stopped
+    networks:
+      - web
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.tma-content-assistant.rule=Host(`tma-content-assistant.ivantereshin-test.store`)
+      - traefik.http.routers.tma-content-assistant.entrypoints=websecure
+      - traefik.http.routers.tma-content-assistant.tls.certresolver=le
+      - traefik.http.services.tma-content-assistant.loadbalancer.server.port=80
+
+networks:
+  web:
+    external: true
+

@@ -15,7 +15,11 @@ export function useLocalStorageState<T>(key: string, initialValue: T) {
   });
 
   useEffect(() => {
-    window.localStorage.setItem(key, JSON.stringify(value));
+    try {
+      window.localStorage.setItem(key, JSON.stringify(value));
+    } catch {
+      // The demo remains usable when storage is blocked or full.
+    }
   }, [key, value]);
 
   return [value, setValue] as const;

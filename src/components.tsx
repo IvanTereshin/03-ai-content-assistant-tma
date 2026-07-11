@@ -32,20 +32,17 @@ const tabLabels: Record<TabId, string> = {
   history: 'История',
   editor: 'Редактор',
   calendar: 'План',
-  settings: 'Бренд',
+  settings: 'Настр.',
 };
 
-export function AppHeader({ credits }: { credits: number }) {
+export function AppHeader() {
   return (
     <header className="app-header">
       <div>
-        <p className="muted-label">Telegram Mini App</p>
-        <h1>AI Content Assistant</h1>
+        <p className="muted-label">Telegram creator desk</p>
+        <h1>Signal / Content Desk</h1>
       </div>
-      <div className="credit-pill">
-        <Sparkles size={15} />
-        {credits}
-      </div>
+      <div className="credit-pill">LOCAL DEMO</div>
     </header>
   );
 }
@@ -99,7 +96,7 @@ export function ResultActions({
       </button>
       <button className="ghost-button" type="button" onClick={onSend}>
         <MessageCircle size={16} />
-        В чат
+        Выбрать
       </button>
     </div>
   );
@@ -137,7 +134,7 @@ export function Toast({ toast }: { toast: ToastState | null }) {
   }
 
   return (
-    <div className={`toast toast-${toast.tone}`}>
+    <div className={`toast toast-${toast.tone}`} role="status" aria-live="polite">
       <CheckCircle2 size={17} />
       {toast.message}
     </div>

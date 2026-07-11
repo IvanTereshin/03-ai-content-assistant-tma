@@ -1,5 +1,6 @@
-import { useMemo, useState } from 'react';
-import { Bot, Check, ChevronRight, Clock3, WandSparkles } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { useGSAP } from '@gsap/react';
+import { Check, ChevronRight, Clock3, ShieldCheck, WandSparkles } from 'lucide-react';
 import {
   AppHeader,
   BottomNav,
@@ -7,10 +8,10 @@ import {
   ResultActions,
   StatusBadge,
   Toast,
-  VisualAsset,
 } from './components';
 import { defaultBrand, defaultForm, scenarios, seedCalendar, seedDrafts, toneLabels } from './data';
 import { createGeneration, transformDraft } from './generator';
+import { playResultReveal, playStudioEntry } from './motion/contentMotion';
 import { useLocalStorageState } from './storage';
 import type {
   AiCommand,
@@ -39,7 +40,88 @@ const calendarStatusFlow: Record<CalendarStatus, CalendarStatus> = {
   posted: 'draft',
 };
 
+const variantProfiles = [
+  {
+    title: 'Expert',
+    note: 'больше позиции и аргументов',
+  },
+  {
+    title: 'Short',
+    note: 'быстрее читается в ленте',
+  },
+  {
+    title: 'Sales',
+    note: 'сильнее ведет к действию',
+  },
+];
+
+function getClicheHits(text: string, stopWords: string): string[] {
+  const source = text.toLowerCase();
+  const defaultWords = ['уникальный', 'инновационный', 'революционный', 'лучший на рынке'];
+  const customWords = stopWords
+    .split(',')
+    .map((word) => word.trim().toLowerCase())
+    .filter(Boolean);
+
+  return [...defaultWords, ...customWords].filter((word, index, list) => list.indexOf(word) === index && source.includes(word));
+}
+
+function getQualityScore(text: string, stopWords: string) {
+  const clicheHits = getClicheHits(text, stopWords);
+  const hasStructure = /cta|хук|пн|вт|1\.|-/i.test(text);
+  const hasNumbers = /\d/.test(text);
+  const hasAudience = /читател|автор|канал|аудитори/i.test(text);
+  const lengthScore = text.length > 260 && text.length < 1700 ? 88 : 74;
+  const tone = Math.max(58, 86 - clicheHits.length * 7 + (hasAudience ? 5 : 0));
+  const structure = hasStructure ? 91 : 73;
+  const concrete = Math.min(94, 72 + (hasNumbers ? 10 : 0) + (hasAudience ? 8 : 0));
+  const clicheRisk = Math.min(92, 18 + clicheHits.length * 18);
+  const overall = Math.round((tone + structure + concrete + lengthScore + (100 - clicheRisk)) / 5);
+
+  return { clicheHits, clicheRisk, concrete, lengthScore, overall, structure, tone };
+}
+
+function getPreviewText(generation: Generation | null, variantIndex: number, form: GeneratorForm): string {
+  const variant = generation?.variants[variantIndex];
+
+  if (variant) {
+    return variant;
+  }
+
+  return `Хук: ${form.topic}\n\nГлавная мысль: регулярный контент держится на системе тем, черновиков и проверки перед публикацией.\n\nCTA: сохраните идею и превратите ее в ближайший пост.`;
+}
+
+function TelegramPostPreview({ text }: { text: string }) {
+  const previewLines = text
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(0, 6);
+
+  return (
+    <aside className="telegram-preview" data-studio-motion aria-label="Preview Telegram-поста">
+      <div className="telegram-preview-head">
+        <span className="channel-avatar">FN</span>
+        <div>
+          <strong>@founder_notes</strong>
+          <small>preview публикации</small>
+        </div>
+      </div>
+      <div className="telegram-post">
+        {previewLines.map((line, index) => (
+          <p key={`${line}-${index}`}>{line}</p>
+        ))}
+      </div>
+      <div className="telegram-reactions">
+        <span>Предпросмотр · без отправки</span>
+      </div>
+    </aside>
+  );
+}
+
 export default function App() {
+  const shellRef = useRef<HTMLElement | null>(null);
+  const resultsRef = useRef<HTMLElement | null>(null);
   const [activeTab, setActiveTab] = useState<TabId>('home');
   const [activeScenario, setActiveScenario] = useState<ScenarioId>('post');
   const [form, setForm] = useState<GeneratorForm>(defaultForm);
@@ -47,13 +129,51 @@ export default function App() {
   const [history, setHistory] = useLocalStorageState<Generation[]>('aca-history', []);
   const [drafts, setDrafts] = useLocalStorageState<Draft[]>('aca-drafts', seedDrafts);
   const [calendar, setCalendar] = useLocalStorageState<CalendarItem[]>('aca-calendar', seedCalendar);
+  const [draftVersions, setDraftVersions] = useLocalStorageState<Record<string, string[]>>('aca-versions-v2', {});
+  const [approvedDraftIds, setApprovedDraftIds] = useLocalStorageState<string[]>('aca-approved-v2', []);
   const [latestGeneration, setLatestGeneration] = useState<Generation | null>(null);
+  const [activeVariantIndex, setActiveVariantIndex] = useState(0);
+  const [generationState, setGenerationState] = useState<'idle' | 'loading' | 'error'>('idle');
   const [activeDraftId, setActiveDraftId] = useState(seedDrafts[0]?.id ?? '');
   const [historyQuery, setHistoryQuery] = useState('');
   const [toast, setToast] = useState<ToastState | null>(null);
 
   const activeDraft = drafts.find((draft) => draft.id === activeDraftId) ?? drafts[0];
   const selectedScenario = scenarios.find((scenario) => scenario.id === activeScenario) ?? scenarios[1];
+  const previewText = getPreviewText(latestGeneration, activeVariantIndex, form);
+  const qualityScore = getQualityScore(previewText, brand.stopWords);
+  const activeVariantProfile = variantProfiles[activeVariantIndex] ?? variantProfiles[0];
+
+  useEffect(() => {
+    const settingsButton = window.Telegram?.WebApp?.SettingsButton;
+    if (!settingsButton?.show) {
+      return undefined;
+    }
+
+    const openSettings = () => setActiveTab('settings');
+    settingsButton.show();
+    settingsButton.onClick?.(openSettings);
+
+    return () => {
+      settingsButton.offClick?.(openSettings);
+    };
+  }, []);
+
+  useGSAP(
+    () => {
+      if (activeTab === 'home') {
+        playStudioEntry(shellRef.current);
+      }
+    },
+    { dependencies: [activeTab] },
+  );
+
+  useGSAP(
+    () => {
+      playResultReveal(resultsRef.current);
+    },
+    { dependencies: [latestGeneration?.id] },
+  );
 
   const filteredHistory = useMemo(() => {
     const query = historyQuery.trim().toLowerCase();
@@ -77,12 +197,21 @@ export default function App() {
     setForm((current) => ({ ...current, [key]: value }));
   }
 
-  function runGeneration() {
-    const generation = createGeneration(activeScenario, form, brand);
-    setLatestGeneration(generation);
-    setHistory((current) => [generation, ...current].slice(0, 24));
-    setBrand((current) => ({ ...current, credits: Math.max(current.credits - 3, 0) }));
-    showToast('Готово: добавил варианты в историю');
+  function runGeneration(retry = false) {
+    setGenerationState('loading');
+    window.setTimeout(() => {
+      const shouldFail = new URLSearchParams(window.location.search).get('generation') === 'error' && !retry;
+      if (shouldFail) {
+        setGenerationState('error');
+        return;
+      }
+      const generation = createGeneration(activeScenario, form, brand);
+      setLatestGeneration(generation);
+      setActiveVariantIndex(0);
+      setHistory((current) => [generation, ...current].slice(0, 24));
+      setGenerationState('idle');
+      showToast('Демо-варианты готовы. Проверьте факты и формулировки.');
+    }, 640);
   }
 
   async function copyText(text: string) {
@@ -99,24 +228,25 @@ export default function App() {
       updatedAt: new Date().toISOString(),
     };
     setDrafts((current) => [draft, ...current]);
+    setDraftVersions((current) => ({ ...current, [draft.id]: [text] }));
     setActiveDraftId(draft.id);
     setActiveTab('editor');
     showToast('Сохранено в черновики');
   }
 
-  function simulateSend(text: string) {
-    const title = text.split('\n')[0].replace(/[:#]/g, '').slice(0, 56) || 'Пост из AI Assistant';
+  function scheduleDraft(text: string, title = 'Пост после проверки') {
+    const calendarTitle = title.trim().slice(0, 56) || text.split('\n')[0].replace(/[:#]/g, '').slice(0, 56) || 'Пост после проверки';
     const nextItem: CalendarItem = {
       id: crypto.randomUUID(),
       day: 'Сегодня',
       dateLabel: 'Через 15 мин',
-      title,
+      title: calendarTitle,
       channel: '@founder_notes',
       status: 'ready',
-      hook: text.split('\n').find((line) => line.length > 20)?.slice(0, 110) ?? title,
+      hook: text.split('\n').find((line) => line.length > 20)?.slice(0, 110) ?? calendarTitle,
     };
     setCalendar((current) => [nextItem, ...current]);
-    showToast('Имитация: пост поставлен в очередь Telegram', 'info');
+    showToast('Сохранено в локальный демо-календарь. В Telegram ничего не отправлено.', 'info');
   }
 
   function applyAiCommand(command: AiCommand) {
@@ -125,6 +255,11 @@ export default function App() {
     }
 
     const transformed = transformDraft(command, activeDraft.content);
+    setDraftVersions((current) => ({
+      ...current,
+      [activeDraft.id]: [...(current[activeDraft.id] ?? [activeDraft.content]), transformed].slice(-8),
+    }));
+    setApprovedDraftIds((current) => current.filter((id) => id !== activeDraft.id));
     setDrafts((current) =>
       current.map((draft) =>
         draft.id === activeDraft.id
@@ -145,6 +280,7 @@ export default function App() {
         draft.id === activeDraft.id ? { ...draft, content, updatedAt: new Date().toISOString() } : draft,
       ),
     );
+    setApprovedDraftIds((current) => current.filter((id) => id !== activeDraft.id));
   }
 
   function createBlankDraft() {
@@ -156,6 +292,7 @@ export default function App() {
       updatedAt: new Date().toISOString(),
     };
     setDrafts((current) => [draft, ...current]);
+    setDraftVersions((current) => ({ ...current, [draft.id]: [draft.content] }));
     setActiveDraftId(draft.id);
     setActiveTab('editor');
   }
@@ -170,28 +307,48 @@ export default function App() {
 
   return (
     <div className="telegram-page">
-      <main className="app-shell">
-        <AppHeader credits={brand.credits} />
+      <main className="app-shell" ref={shellRef}>
+        <a className="skip-link" href="#workspace">Перейти к рабочей области</a>
+        <AppHeader />
 
         {activeTab === 'home' && (
-          <section className="screen-stack" aria-label="Главная">
-            <div className="workspace-grid">
-              <VisualAsset
-                src="/assets/ai-workspace.png"
-                title="AI workspace"
-                text="Здесь можно заменить картинку на public/assets/ai-workspace.png"
-              />
-              <div className="summary-panel">
-                <div className="summary-top">
-                  <Bot size={20} />
-                  <span>{toneLabels[brand.tone]}</span>
+          <section className="studio-screen" id="workspace" tabIndex={-1} aria-label="Студия автора">
+            <section className="studio-hero">
+              <div className="channel-context" data-studio-motion>
+                <div className="context-topline">
+                  <span className="channel-avatar">FN</span>
+                  <div>
+                    <p className="muted-label">Brand voice</p>
+                    <h2>{brand.niche}</h2>
+                  </div>
                 </div>
-                <strong>{brand.niche}</strong>
                 <p>{brand.audience}</p>
+                <div className="brand-tags">
+                  <span>{toneLabels[brand.tone]}</span>
+                  {brand.stopWords
+                    .split(',')
+                    .map((word) => word.trim())
+                    .filter(Boolean)
+                    .slice(0, 3)
+                    .map((word) => (
+                      <span key={word}>{word}</span>
+                    ))}
+                </div>
+                <div className="credits-ledger">
+                  <span>Режим</span>
+                  <strong>DEMO</strong>
+                  <small>локальная симуляция</small>
+                </div>
+                <button className="small-link" type="button" onClick={() => setActiveTab('settings')}>
+                  Бренд
+                  <ChevronRight size={15} />
+                </button>
               </div>
-            </div>
 
-            <section className="scenario-strip" aria-label="Сценарии генерации">
+              <TelegramPostPreview text={previewText} />
+            </section>
+
+            <section className="preset-rail" data-studio-motion aria-label="Presets генерации">
               {scenarios.map((scenario, index) => {
                 const Icon = scenario.icon;
                 const isActive = scenario.id === activeScenario && scenario.title === selectedScenario.title;
@@ -199,11 +356,11 @@ export default function App() {
                 return (
                   <button
                     key={`${scenario.title}-${index}`}
-                    className={`scenario-card ${isActive ? 'is-active' : ''}`}
+                    className={`preset-card ${isActive ? 'is-active' : ''}`}
                     type="button"
                     onClick={() => setActiveScenario(scenario.id)}
                   >
-                    <Icon size={19} />
+                    <Icon size={18} />
                     <span>{scenario.title}</span>
                     <small>{scenario.description}</small>
                   </button>
@@ -211,16 +368,13 @@ export default function App() {
               })}
             </section>
 
-            <section className="panel generation-panel">
+            <section className="studio-composer" data-studio-motion>
               <div className="section-heading">
                 <div>
-                  <p className="muted-label">Сценарий</p>
+                  <p className="muted-label">Editor studio</p>
                   <h2>{selectedScenario.title}</h2>
                 </div>
-                <button className="small-link" type="button" onClick={() => setActiveTab('settings')}>
-                  Бренд
-                  <ChevronRight size={15} />
-                </button>
+                <span className="studio-mode">{activeVariantProfile.title}</span>
               </div>
 
               <label className="field">
@@ -229,15 +383,6 @@ export default function App() {
                   value={form.topic}
                   onChange={(event) => updateForm('topic', event.target.value)}
                   rows={3}
-                />
-              </label>
-
-              <label className="field">
-                <span>Аудитория</span>
-                <textarea
-                  value={form.audience}
-                  onChange={(event) => updateForm('audience', event.target.value)}
-                  rows={2}
                 />
               </label>
 
@@ -286,30 +431,89 @@ export default function App() {
                 </label>
               )}
 
-              <button className="primary-button" type="button" onClick={runGeneration}>
+              <div className="quality-grid" aria-label="Оценка качества">
+                <div>
+                  <span>Score</span>
+                  <strong>{qualityScore.overall}</strong>
+                </div>
+                <div>
+                  <span>Тон</span>
+                  <strong>{qualityScore.tone}</strong>
+                </div>
+                <div>
+                  <span>Конкретика</span>
+                  <strong>{qualityScore.concrete}</strong>
+                </div>
+                <div>
+                  <span>Клише</span>
+                  <strong>{qualityScore.clicheRisk}%</strong>
+                </div>
+              </div>
+
+              <div className="cliche-row">
+                <ShieldCheck size={16} />
+                <span>
+                  {qualityScore.clicheHits.length > 0
+                    ? `Проверить: ${qualityScore.clicheHits.join(', ')}`
+                    : 'Анти-клише фильтр: чисто'}
+                </span>
+              </div>
+
+              <p className="ai-limitation">AI-ограничение: это локально собранные демо-варианты. Проверьте факты, тон и обещания перед публикацией.</p>
+              <button className="primary-button" type="button" disabled={generationState === 'loading'} onClick={() => runGeneration(false)}>
                 <WandSparkles size={18} />
-                Сгенерировать варианты
+                {generationState === 'loading' ? 'Собираем варианты…' : 'Сгенерировать демо-варианты'}
               </button>
             </section>
 
-            <section className="results-list" aria-label="Результаты">
-              {!latestGeneration && (
-                <EmptyState>Выберите сценарий и нажмите генерацию. Результаты появятся здесь.</EmptyState>
+            <section className="variant-workbench" ref={resultsRef} data-studio-motion aria-label="Результаты">
+              <div className="section-heading">
+                <div>
+                  <p className="muted-label">Variant board</p>
+                  <h2>Сравнение результата</h2>
+                </div>
+                <span className="count-pill">{latestGeneration?.variants.length ?? 0}</span>
+              </div>
+              {generationState === 'loading' && <div className="generation-loading" role="status" aria-live="polite">Анализируем brief и brand voice…</div>}
+              {generationState === 'error' && <div className="generation-error" role="alert"><strong>Не удалось собрать варианты</strong><span>Это тестируемое демо-состояние. Brief сохранён.</span><button type="button" onClick={() => runGeneration(true)}>Повторить</button></div>}
+              {!latestGeneration && generationState === 'idle' && (
+                <EmptyState>Готовые версии, оценка и preview появятся в этом рабочем поле.</EmptyState>
               )}
-              {latestGeneration?.variants.map((variant, index) => (
-                <article className="result-card" key={`${latestGeneration.id}-${index}`}>
-                  <div className="result-card-head">
-                    <span>Вариант {index + 1}</span>
-                    <Check size={16} />
-                  </div>
-                  <p>{variant}</p>
-                  <ResultActions
-                    onCopy={() => void copyText(variant)}
-                    onSave={() => saveAsDraft(variant)}
-                    onSend={() => simulateSend(variant)}
-                  />
-                </article>
-              ))}
+              {latestGeneration?.variants.map((variant, index) => {
+                const profile = variantProfiles[index] ?? variantProfiles[0];
+                const score = getQualityScore(variant, brand.stopWords);
+                const isActive = activeVariantIndex === index;
+
+                return (
+                  <article
+                    className={`variant-card ${isActive ? 'is-active' : ''}`}
+                    data-result-motion
+                    key={`${latestGeneration.id}-${index}`}
+                  >
+                    <div className="variant-card-head">
+                      <button className="variant-selector" type="button" onClick={() => setActiveVariantIndex(index)}>
+                        <span>{profile.title}</span>
+                        <small>{profile.note}</small>
+                      </button>
+                      <div className="score-badge">
+                        <Check size={15} />
+                        {score.overall}
+                      </div>
+                    </div>
+                    <div className="variant-metrics">
+                      <span>Тон {score.tone}</span>
+                      <span>Структура {score.structure}</span>
+                      <span>Клише {score.clicheRisk}%</span>
+                    </div>
+                    <p className="variant-text">{variant}</p>
+                    <ResultActions
+                      onCopy={() => void copyText(variant)}
+                      onSave={() => saveAsDraft(variant)}
+                      onSend={() => saveAsDraft(variant)}
+                    />
+                  </article>
+                );
+              })}
             </section>
           </section>
         )}
@@ -381,7 +585,8 @@ export default function App() {
             </div>
 
             {activeDraft ? (
-              <section className="panel editor-panel">
+              <section className="editor-workspace">
+                <div className="panel editor-panel">
                 <div className="editor-meta">
                   <StatusBadge status={activeDraft.status} />
                   <span>
@@ -394,6 +599,7 @@ export default function App() {
                 </div>
                 <textarea
                   className="draft-editor"
+                  aria-label="Текст черновика"
                   value={activeDraft.content}
                   onChange={(event) => updateActiveDraft(event.target.value)}
                 />
@@ -403,6 +609,32 @@ export default function App() {
                       {command.title}
                     </button>
                   ))}
+                </div>
+                <section className="version-history" aria-label="История версий">
+                  <strong>История версий</strong>
+                  {(draftVersions[activeDraft.id] ?? [activeDraft.content]).map((version, index, list) => (
+                    <button key={`${activeDraft.id}-${index}`} type="button" onClick={() => updateActiveDraft(version)}>
+                      v{index + 1} · {index === list.length - 1 ? 'текущая команда' : 'сохранённая'}
+                    </button>
+                  ))}
+                </section>
+                </div>
+                <div className="approval-column">
+                  <TelegramPostPreview text={activeDraft.content} />
+                  <section className="approval-gate">
+                    <strong>Human approval</strong>
+                    <p>Проверьте факты, ссылки, обещания и соответствие голосу канала. Симуляция не публикует пост.</p>
+                    <button
+                      className={approvedDraftIds.includes(activeDraft.id) ? 'approved' : ''}
+                      type="button"
+                      onClick={() => setApprovedDraftIds((current) => current.includes(activeDraft.id) ? current.filter((id) => id !== activeDraft.id) : [...current, activeDraft.id])}
+                    >
+                      {approvedDraftIds.includes(activeDraft.id) ? 'Одобрено человеком' : 'Одобрить после проверки'}
+                    </button>
+                    <button className="primary-button" type="button" disabled={!approvedDraftIds.includes(activeDraft.id)} onClick={() => scheduleDraft(activeDraft.content, activeDraft.title)}>
+                      Сохранить в демо-календарь
+                    </button>
+                  </section>
                 </div>
               </section>
             ) : (
@@ -445,18 +677,13 @@ export default function App() {
 
         {activeTab === 'settings' && (
           <section className="screen-stack">
-            <VisualAsset
-              src="/assets/ai-brand-card.png"
-              title="Brand card"
-              text="Здесь можно заменить картинку на public/assets/ai-brand-card.png"
-            />
             <section className="panel settings-panel">
               <div className="section-heading">
                 <div>
-                  <p className="muted-label">Профиль</p>
-                  <h2>Настройки бренда</h2>
+                  <p className="muted-label">Контекст канала</p>
+                  <h2>Brand voice</h2>
                 </div>
-                <span className="credit-pill">{brand.credits} credits</span>
+                <span className="credit-pill">LOCAL DEMO</span>
               </div>
 
               <label className="field">
@@ -495,6 +722,8 @@ export default function App() {
                   rows={3}
                 />
               </label>
+
+              <p className="ai-limitation">Настройки сохраняются только в localStorage этого браузера. Реальная AI-модель, Telegram-отправка и платёжный backend не подключены.</p>
             </section>
           </section>
         )}
